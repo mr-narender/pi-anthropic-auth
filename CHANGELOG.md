@@ -1,5 +1,71 @@
 # Changelog
 
+## [3.5.0](https://github.com/gotgenes/pi-anthropic-auth/compare/v3.4.5...v3.5.0) (2026-11-13)
+
+
+### Features
+
+* warn when Pi's default prompt opens with a preamble shaping does not recognize ([bf1bdfc](https://github.com/gotgenes/pi-anthropic-auth/commit/bf1bdfcfed137136601ca122f405c56dcf3c22de))
+
+### Bug Fixes
+
+* strip Pi 1.5's reworded identity, docs, and tool filler from OAuth prompts ([213970b](https://github.com/gotgenes/pi-anthropic-auth/commit/213970b9dd9624cec6f45c6b7e1c85b1f8a0a7fe))
+* report Claude Code 2.1.323 in the OAuth billing header ([1b724b0](https://github.com/gotgenes/pi-anthropic-auth/commit/1b724b042f6b8bf3317f5bac921a6b804112b1fa))
+
+### Documentation
+
+* document both Pi prompt wordings, the preamble warning, and the thread alarm ([e7b129a](https://github.com/gotgenes/pi-anthropic-auth/commit/e7b129af28eb3b6ee6c312addf1839592d1108d3))
+
+### Miscellaneous Chores
+
+* bump pi-ai and pi-coding-agent devDependencies to 1.5.2 ([d83f1e9](https://github.com/gotgenes/pi-anthropic-auth/commit/d83f1e9bd96996cc3a3de8ba88945d52ca4d92e8))
+
+## [3.4.5](https://github.com/gotgenes/pi-anthropic-auth/compare/v3.4.4...v3.4.5) (2026-11-13)
+
+
+### Bug Fixes
+
+* opt OAuth requests out of message threads so every request carries the billing header ([451f42d](https://github.com/gotgenes/pi-anthropic-auth/commit/451f42d6c68df606607080ad808934fc300573f6)), closes [#86](https://github.com/gotgenes/pi-anthropic-auth/issues/86)
+* point header-less version rejections at Pi's own claude-cli version instead of the env override ([0f08565](https://github.com/gotgenes/pi-anthropic-auth/commit/0f08565b5651f9bb544ea1e4ebe8a1fc88ab300b)), closes [#86](https://github.com/gotgenes/pi-anthropic-auth/issues/86)
+
+### Documentation
+
+* document the message-thread opt-out and the header-less hint ([aae20fe](https://github.com/gotgenes/pi-anthropic-auth/commit/aae20fe53e01bd79bf64eb4a863df2d1ceb0ebce)), closes [#86](https://github.com/gotgenes/pi-anthropic-auth/issues/86)
+
+## [3.4.4](https://github.com/gotgenes/pi-anthropic-auth/compare/v3.4.3...v3.4.4) (2026-11-01)
+
+
+### Documentation
+
+* explain why the billing header reports sdk-cli ([3c21a83](https://github.com/gotgenes/pi-anthropic-auth/commit/3c21a83e53389a285919d235dec92fd308b2a20a)), closes [#83](https://github.com/gotgenes/pi-anthropic-auth/issues/83)
+* explain why Pi uses the 5-hour window faster than Claude Code ([02828fd](https://github.com/gotgenes/pi-anthropic-auth/commit/02828fdd24582ab332281edb9783adf128b189d4)), closes [#83](https://github.com/gotgenes/pi-anthropic-auth/issues/83)
+* attribute the sdk-* weighting claim to its upstream report ([7fb93d9](https://github.com/gotgenes/pi-anthropic-auth/commit/7fb93d90cc293a3f089c7e79854dda63777bcb27)), closes [#83](https://github.com/gotgenes/pi-anthropic-auth/issues/83)
+* soften the sdk-cli entrypoint wording ([58abc25](https://github.com/gotgenes/pi-anthropic-auth/commit/58abc25a820f868285724f8ac41ad88c2913c0b3)), closes [#83](https://github.com/gotgenes/pi-anthropic-auth/issues/83)
+
+## [3.4.3](https://github.com/gotgenes/pi-anthropic-auth/compare/v3.4.2...v3.4.3) (2026-10-16)
+
+
+### Documentation
+
+* point carriesEffort at the compat flag instead of a model list ([959c859](https://github.com/gotgenes/pi-anthropic-auth/commit/959c859a8666c811af09c121f54659d047361c1a))
+* correct stale >=0.80.8 peer-floor references to >=0.86.0 ([ce3e2be](https://github.com/gotgenes/pi-anthropic-auth/commit/ce3e2be12953eec38ec69e043a562b858b0ff0aa))
+* point managed-effort model lists at the compat flag and drift suite ([f222b28](https://github.com/gotgenes/pi-anthropic-auth/commit/f222b281890d39fd4fbd80e8184f179fa92488d1))
+
+### Miscellaneous Chores
+
+* bump pi-ai and pi-coding-agent devDependencies to 1.3.0 ([b3884c8](https://github.com/gotgenes/pi-anthropic-auth/commit/b3884c8958b362f0e39ec446ebe29c377230d94d))
+
+## [3.4.2](https://github.com/gotgenes/pi-anthropic-auth/compare/v3.4.1...v3.4.2) (2026-10-01)
+
+
+### Documentation
+
+* note pi 1.0.0's headless copy-code login in README ([29f99c1](https://github.com/gotgenes/pi-anthropic-auth/commit/29f99c1b2e692465d15f7efc0898e54af558414a))
+
+### Miscellaneous Chores
+
+* bump pi-ai and pi-coding-agent devDependencies to 1.0.0 ([7df1b17](https://github.com/gotgenes/pi-anthropic-auth/commit/7df1b17e0a125276cb72c6032b9d21ca3f53a68c))
+
 ## [3.4.1](https://github.com/gotgenes/pi-anthropic-auth/compare/v3.4.0...v3.4.1) (2026-09-30)
 
 

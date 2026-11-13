@@ -53,7 +53,7 @@ flowchart TD
     MR --> PC["provider-composer.streamWith"]
     PC --> W["streamSimple wrapper (this extension)"]
     W --> D{"sk-ant-oat token?"}
-    D -->|"yes"| S["Inject onPayload shaping"]
+    D -->|"yes"| S["Inject onPayload shaping, fetch wrapper, thread opt-out"]
     D -->|"no"| P["Pass through unchanged"]
     S --> G["built-in anthropicMessagesApi().streamSimple"]
     P --> G
@@ -127,11 +127,17 @@ This replaces the previous, brittle approach of sniffing system-prompt markers a
 
 For OAuth requests, the injected `onPayload` runs `shapeAnthropicOAuthPayload`, which:
 
-1. sanitizes Pi's default prompt section by section (de-fingerprinting) — replacing the untagged preamble with a minimal neutral prompt, dropping the `docs` section, and stripping the custom-tool filler from inside `tools`, while preserving every other section byte-identically,
-2. applies those same section rules to the mid-conversation `role: "system"` messages Pi 0.86.0 re-sends on models that accept them (Issue #69) — a message the rules empty is dropped unless it carries `output_config`, because on managed-effort models (those pi-ai flags `compat.supportsMidConvoEffort`; as of pi 0.99.1: Fable 5.1, Opus 5, Opus 5.5, Sonnet 5.5) Pi pins the top-level effort to `"high"` and sends the requested effort as content-less system messages, which dropping would silently discard (PR #79), and
-3. prepends an `x-anthropic-billing-header` system block (without `cache_control`).
+1. sanitizes Pi's default prompt section by section (de-fingerprinting) — replacing the untagged preamble with a minimal neutral prompt, dropping the `docs` section, and stripping the custom-tool filler from inside `tools`, while preserving every other section byte-identically; the preamble prefix and both anchors are lists holding one entry per Pi wording (pi 1.5.0 reworded all three), because the peer range spans more than one,
+2. applies those same section rules to the mid-conversation `role: "system"` messages Pi 0.86.0 re-sends on models that accept them (Issue #69) — a message the rules empty is dropped unless it carries `output_config`, because on managed-effort models (those pi-ai flags `compat.supportsMidConvoEffort`, which `test/managed-effort-drift.test.ts` enumerates from the installed catalog) Pi pins the top-level effort to `"high"` and sends the requested effort as content-less system messages, which dropping would silently discard (PR #79), and
+3. prepends an `x-anthropic-billing-header` system block (without `cache_control`) that reports `cc_entrypoint=sdk-cli`, the label Claude Code sends from its print mode (Issue #83).
 
 Assistant messages pass through unmodified; see "Assistant block ordering is not normalized" below.
+
+Only a `system[]` block containing a known preamble prefix is shaped.
+When Pi rewords its preamble, its prompt fails that gate and reaches Anthropic whole, while every request still returns 200; that went unnoticed for pi 1.5.0 until the devDeps were bumped (Issue #89).
+So a block that fails the gate but carries all three of Pi's own sections (`tools`, `rules`, `docs`) is passed through with a one-time `console.warn` naming `PI_DEFAULT_PROMPT_PREFIXES`.
+Pi emits those three only with its default preamble; requiring all of them keeps a custom subagent prompt that pi-permission-system gives `tools` and `rules` sections from warning.
+The gate itself stays prefix-based, so such custom prompts are never rewritten.
 
 For OAuth requests the wrapper also injects an `options.fetch` wrapper.
 One fact it needs is not available at `onPayload` time: pi-ai's `createClient` adds `user-agent: claude-cli/<version>` to the built request, downstream of every other seam this extension can reach, and Anthropic gates new models on the `cc_version` we send rather than on that header.
@@ -143,7 +149,16 @@ The same `fetch` wrapper recovers when Anthropic raises a model's floor above bo
 It inspects only a 400, through `response.clone()`, so a streaming success response is never read.
 When the body is a `claude_code_version_too_old` rejection naming a higher floor, the wrapper splices the billing header up to that floor and retries once, with the same exact-string replacement as above.
 The floor is learned for the wrapper's lifetime, owned by `createAnthropicOAuthStreamSimple` rather than by module state, so later requests go out at it directly.
-When recovery cannot run (an override is set, the floor is not named, the body cannot be rebuilt) or the retry is rejected too, the 400 is returned with a `[pi-anthropic-auth]` hint appended to `error.message`; status, headers, `error_code`, and `request_id` are preserved.
+When recovery cannot run (the request carried no billing header, an override is set, the floor is not named, the body cannot be rebuilt) or the retry is rejected too, the 400 is returned with a `[pi-anthropic-auth]` hint appended to `error.message`; status, headers, `error_code`, and `request_id` are preserved.
+A request without our billing header was gated on pi's own `claude-cli` user-agent, so its hint says to upgrade pi, and its named floor is not learned (Issue #86).
+
+For OAuth requests the wrapper also sets `disableContinuation: true` (Issue #86).
+pi-ai 1.5.0 sends Anthropic [message threads](https://platform.claude.com/docs/en/build-with-claude/message-threads): when a session's conversation prefix is unchanged, it sends each later turn as a `thread: continue` request carrying only the new messages.
+It builds that request after `onPayload` has run and leaves out `system` and `tools`, which Anthropic accepts only on the request that creates a thread, so a continuation can never carry the billing header.
+With the opt-out, every OAuth request is sent in full, as on pi <=1.4 and as Claude Code sends them (measured: Claude Code 2.1.311 and 2.1.323 send no `message-threads` beta and no `thread` field).
+Anthropic and pi both document threads as leaving tokens and prompt caching unchanged, so the cost is upload size only.
+API-key requests keep pi's threads; whether OAuth requests could use them is tracked in Issue #90.
+`test/message-thread-drift.test.ts` drives pi's own transport through two turns of one session, so a pi release that stops honoring the opt-out fails the suite rather than silently dropping the header (Issue #89).
 
 The wrapper composes, rather than replaces, any caller-provided `onPayload` and any caller-provided `fetch`.
 On the main loop, Pi still passes its own `onPayload` (which fires other extensions' `before_provider_request` handlers); the wrapper runs those first and applies our shaping last, closest to the wire.

@@ -268,4 +268,48 @@ describe("createAnthropicOAuthStreamSimple", () => {
     assert.match(sentBodies[1] ?? "", /cc_version=2\.9\.0\./);
     assert.match(sentBodies[2] ?? "", /cc_version=2\.9\.0\./);
   });
+
+  // pi-ai >=1.5.0 strips `system` from message-thread continuations after
+  // `onPayload` runs, so a continuation cannot carry the billing header.
+  describe("message-thread opt-out", () => {
+    function delegatedOptions(): SimpleStreamOptions {
+      const options = calls[0]?.options;
+      assert.ok(options);
+      return options;
+    }
+
+    test("opts OAuth requests out of continuations", () => {
+      wrapped(MODEL, CONTEXT, { apiKey: OAUTH_TOKEN });
+
+      assert.equal(delegatedOptions().disableContinuation, true);
+    });
+
+    test("overrides a caller that allowed continuations on an OAuth request", () => {
+      const callerOptions: SimpleStreamOptions = {
+        apiKey: OAUTH_TOKEN,
+        disableContinuation: false,
+      };
+
+      wrapped(MODEL, CONTEXT, callerOptions);
+
+      assert.equal(delegatedOptions().disableContinuation, true);
+    });
+
+    test("adds no opt-out to API-key requests", () => {
+      wrapped(MODEL, CONTEXT, { apiKey: API_KEY });
+
+      assert.equal("disableContinuation" in delegatedOptions(), false);
+    });
+
+    test("keeps an API-key caller's own opt-out", () => {
+      const callerOptions: SimpleStreamOptions = {
+        apiKey: API_KEY,
+        disableContinuation: true,
+      };
+
+      wrapped(MODEL, CONTEXT, callerOptions);
+
+      assert.equal(delegatedOptions().disableContinuation, true);
+    });
+  });
 });
