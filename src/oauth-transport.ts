@@ -23,6 +23,23 @@ import { shapeAnthropicOAuthPayload } from "./request-shaping";
 const ANTHROPIC_OAUTH_TOKEN_MARKER = "sk-ant-oat";
 
 /**
+ * pi-ai's per-request opt-out from server-side continuation state.
+ *
+ * pi-ai >=1.5.0 sends Anthropic message-thread continuations with only the
+ * new messages, and builds them after `onPayload` has run, leaving out
+ * `system` — where our billing header lives.  Anthropic rejects `system` on a
+ * continuation, so the header cannot be put back; OAuth requests are sent in
+ * full instead, as on pi <=1.4 and as Claude Code sends them (Issue #86).
+ *
+ * Typed against pi-ai's own option so an upstream rename fails `tsc`; pi
+ * <=1.4 drops the field as an unknown option.
+ */
+const MESSAGE_THREAD_OPT_OUT: Pick<SimpleStreamOptions, "disableContinuation"> =
+  {
+    disableContinuation: true,
+  };
+
+/**
  * The `streamSimple` handler shape Pi's `ProviderConfig` accepts.
  *
  * It matches `ApiStreamSimpleFunction` from `@earendil-works/pi-ai` and is
@@ -152,6 +169,7 @@ export function createAnthropicOAuthStreamSimple(
       ...options,
       onPayload,
       ...(versionSync ? { fetch: versionSync.fetch } : {}),
+      ...(isOAuthRequest ? MESSAGE_THREAD_OPT_OUT : {}),
     });
   };
 }
