@@ -42,6 +42,7 @@ pi -e npm:@gotgenes/pi-anthropic-auth
 ## Usage
 
 1. Run `/login anthropic` as usual — Pi's native Anthropic login flow is preserved.
+   On pi 1.0.0 and later, that includes **Copy code login (headless)**, for when the browser runs on another machine: sign in there, then paste the code Anthropic shows into pi.
 2. Select a Claude Pro/Max model and start chatting. The extension handles compatibility transparently.
 3. API-key behavior is unaffected; the extension's changes apply only to OAuth sessions.
 
@@ -110,6 +111,15 @@ Check `/anthropic-auth:status`.
 If the failing provider is missing from `shaped providers`, name it in the config file (see [Additional Anthropic subscriptions](#additional-anthropic-subscriptions)).
 Its line under `accounts` shows which subscription that provider's login belongs to, and whether extra usage is enabled on it.
 
+### Requests fail after the first tool call on Pi 1.5
+
+Pi 1.5.0 started sending Anthropic requests as message threads: after the first request, each turn sends only the new messages and leaves out the system prompt, where this extension puts the Claude Code billing header.
+With pi-anthropic-auth releases from before the fix, the request after a tool call could fail with a `claude_code_version_too_old` error that recovery could not fix, or be reported as third-party usage.
+
+Upgrade pi-anthropic-auth.
+It now opts Anthropic OAuth requests out of message threads, so every request is sent in full with the billing header, as on Pi 1.4 and as Claude Code sends them.
+API-key requests keep Pi's message threads.
+
 ### Pi warns about extra usage on every OAuth session
 
 Pi prints this warning once per interactive session whenever an Anthropic model is selected and your stored Anthropic credentials are OAuth:
@@ -140,6 +150,23 @@ Turn it off yourself with `/settings` → Warnings → "Anthropic extra usage", 
 
 Because the warning concerns real billing on paths this extension does not cover, that call is yours to make; the extension will never write the setting for you.
 
+### Pi uses the 5-hour window faster than Claude Code
+
+The billing header this extension sends reports `cc_entrypoint=sdk-cli`.
+That is the label Claude Code itself sends from its non-interactive print mode; captured from Claude Code 2.1.309:
+
+| Claude Code mode | `cc_entrypoint` |
+| --- | --- |
+| `claude -p` (print mode) | `sdk-cli` |
+| interactive `claude` | `cli` |
+
+Users in [anthropics/claude-code#97074](https://github.com/anthropics/claude-code/issues/97074) have reported requests labeled `sdk-cli` (or `sdk-ts`, from the Agent SDK) drawing down the 5-hour window about twice as fast as the interactive labels for the same tokens.
+The same reports suggest the weekly limit is not affected.
+Anthropic has not said whether this is intended.
+
+For now the extension keeps `sdk-cli`, since Pi is closer to a program driving the model than to Claude Code's interactive app.
+That may change as Anthropic clarifies how it treats these labels; see [#83](https://github.com/gotgenes/pi-anthropic-auth/issues/83).
+
 ### `ANTHROPIC_API_KEY` is ignored when OAuth credentials exist
 
 Pi's auth resolver gives stored credentials priority over environment variables.
@@ -166,6 +193,7 @@ The rejection names the required version, so the extension rebuilds the billing 
 It remembers that version for the rest of the session, so only the first request after a floor rise pays for the rejected attempt.
 
 If the error still reaches you, it ends with a `[pi-anthropic-auth]` hint saying what to do: raise or unset an override, set one, or upgrade Pi.
+When the rejected request carried no billing header, Anthropic checked Pi's own `claude-cli` version, which no override changes, so the hint says to upgrade Pi.
 To pin the version yourself:
 
 ```bash

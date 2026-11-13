@@ -51,15 +51,17 @@ The current implementation does the following:
 1. Re-registers the built-in `anthropic` provider with a thin `streamSimple` transport wrapper (login and refresh are delegated to Pi's built-in `anthropicOAuth`)
 2. Wraps Pi's built-in Anthropic transport to shape OAuth requests on every call path that reaches `provider-composer` (main loop, compaction, and extension calls through `ctx.modelRegistry.streamSimple()`; not explicit `compat.streamSimple` callers — see Issue #46 and Issue #53)
 3. Prepends an Anthropic billing/content-consistency header block to `system[]`
-4. Sanitizes Pi's default prompt section by section during the same shaping pass — replacing the untagged preamble with a minimal neutral prompt, dropping the `docs` section, and stripping the custom-tool filler from inside `tools` — while preserving every other section byte-identically (tool snippets, guidelines, and appended extension content)
+4. Sanitizes Pi's default prompt section by section during the same shaping pass — replacing the untagged preamble with a minimal neutral prompt, dropping the `docs` section, and stripping the custom-tool filler from inside `tools` — while preserving every other section byte-identically (tool snippets, guidelines, and appended extension content); the anchors match both Pi's <=1.4 and >=1.5 wording, and a prompt carrying Pi's own sections under an unrecognized preamble passes through with a one-time warning (Issue #89)
 5. Applies the same section rules to the mid-conversation system messages Pi 0.86.0 re-sends on models that accept them (Issue #69), while keeping the content-less effort messages Pi sends on managed-effort models (PR #79)
 6. Raises the billing header's `cc_version` to Pi's own `claude-cli` version at the wire when Pi reports a higher one, making the bundled pin a floor rather than the answer (Issue #74)
 7. Recovers from a `claude_code_version_too_old` rejection by retrying once at the floor Anthropic names, remembering that floor for later requests, and appending a hint to the error when it cannot recover (Issue #75)
 8. Gates all shaping on the `sk-ant-oat` OAuth access-token prefix, so API-key and non-Anthropic requests pass through untouched
 9. Registers the same wrapper on any extra provider named in the extension's config file, for Anthropic OAuth subscriptions another extension registers under its own name (pi-multi-pass's `anthropic-2`, Issue #70)
+10. Opts OAuth requests out of Pi's Anthropic message-thread continuations (pi-ai >=1.5.0), which leave out `system` and so the billing header; every OAuth request is sent in full, as Claude Code sends them (Issue #86)
 
 It wraps, but does not reimplement, Pi's built-in Anthropic streaming transport.
 The wrapper delegates to Pi's own built-in Anthropic `streamSimple` transport and injects two steps: an `onPayload` shaping step, and an `options.fetch` wrapper for the version reconciliation and rejection recovery, which need the built request's headers and the response.
+For OAuth requests it also sets `disableContinuation: true`, because pi builds a thread continuation after `onPayload` and leaves out `system` (Issue #86).
 
 ## Principles
 
@@ -97,6 +99,7 @@ It uses one Pi extension seam:
 The `streamSimple` wrapper is the single shaping point.
 It delegates to Pi's built-in Anthropic `streamSimple` transport (resolved at runtime by `src/host-transport.ts`) while injecting an `onPayload` step that runs all provider-specific logic (billing header injection, system prompt shaping).
 It also injects an `options.fetch` wrapper for OAuth requests, because one fact — the Claude Code version pi reports in its `user-agent` — is only observable on the built request, downstream of `onPayload` (Issue #74).
+And it sets `disableContinuation: true` for OAuth requests, because pi-ai >=1.5.0 builds message-thread continuations after `onPayload` without `system`, where the billing header lives (Issue #86).
 The delegate is resolved at runtime rather than read from the api registry: `anthropicMessagesApi()` is the non-deprecated handle pi's own `custom-provider-gitlab-duo` example uses, and reading from a registry this extension does not participate in would bind the delegate to whatever another extension registered there last.
 On pi <=0.80.7 it would also have recursed, because `registerProvider` bridged our wrapper into that slot.
 The pi-ai 0.79.x lazy-registration clobber (Issue #28) is precluded by the `>=0.86.0` peer floor.
@@ -154,7 +157,7 @@ Shared workflow skills (synced from `pi-packages`, adapted to this single packag
 8. `markdown-conventions`: rumdl-enforced markdown rules
 9. `mermaid`: Mermaid authoring and verification
 10. `pi-extension-lifecycle`: Pi turn/tool execution and extension event lifecycle
-11. `shell-traps`: bash traps beyond the zsh facts in Shell (`rg -r`, `pipefail`, backtick bodies, re-verifying counts)
+11. `shell-traps`: bash traps beyond the facts in Shell (`rg -r`, `pipefail`, backtick bodies, re-verifying counts)
 12. `edit-tool`: atomic `Edit` batches, non-ASCII `oldText`, scripted substitutions, block insertion
 
 ### Project Prompts
@@ -259,12 +262,8 @@ Use `pnpm`.
 
 ### Shell
 
-The `bash` tool runs zsh.
-Quote a glob pattern meant for a command rather than the shell — `--include='*.ts'`, `find . -name '*.ts'`.
-Unquoted, it expands against the cwd first: bash silently substitutes a matched filename, and zsh aborts with `no matches found`.
-In zsh an unquoted parameter is not word-split, so `perl -pi -e '…' $FILES` passes the whole list as a single filename — spell a multi-file list inline.
-Do not start a bash word with `=` — zsh's `equals` expansion reads `=word` as a command-path lookup, aborts, and discards the rest of an `A; B; C` chain; use `echo ---`, not `echo ===`.
-When a shell loop or script needs a status variable, do not name it `status` — zsh reserves `$status` (an alias for `$?`) as read-only, so the assignment aborts with `read-only variable: status`; use `state`/`rc` instead.
+The `bash` tool runs `/opt/homebrew/bin/bash` (`shellPath` in `~/.pi/agent/settings.json`), not the zsh in `$SHELL`; write bash syntax.
+Quote a glob pattern meant for a command rather than the shell — `--include='*.ts'`, `find . -name '*.ts'` — or bash silently substitutes a matching filename from the cwd.
 The remaining shell traps (`rg -r`, pipelines under `pipefail`, backtick bodies) live in the `shell-traps` skill.
 
 ### Git Workflow
@@ -351,6 +350,12 @@ pnpm fallow:dupes      # duplicated code blocks
 Fallow runs in CI (`.github/workflows/ci.yml`, mirroring `pi-packages`): a `fallow audit` on pull requests, a `fallow dead-code` gate on `main`, and a non-blocking full `fallow` report on `main`.
 It is not part of `pnpm run lint`, so run the `fallow:*` scripts locally before pushing.
 
+CI also runs Pi versions other than the pinned devDependencies (Issue #56).
+The `floor` job in `ci.yml` installs each Pi package at its `peerDependencies` floor (`scripts/ci/pi-floor-specs.sh`) and runs the test suite, without a typecheck because types newer than the floor are expected.
+The `pi-ceiling` workflow (`.github/workflows/pi-ceiling.yml`) polls hourly, and runs the typecheck and the test suite once against each new npm `latest` that differs from the pins (`scripts/ci/pi-ceiling-specs.sh`), so a breaking Pi release is flagged within about two hours rather than at the next devDependency bump.
+It never runs on pull requests, and dispatching it with `force` re-tests a release.
+Kill criterion: if either catches nothing across a few Pi minor bumps, remove it rather than keep it for symmetry.
+
 ### TypeScript
 
 This repo uses `module: "ESNext"` and `moduleResolution: "Bundler"`.
@@ -416,6 +421,7 @@ If the user selects `Need help` or `Something went wrong`, ask clarifying questi
 ### Context before, not inside
 
 Output all explanatory context — plan summaries, analysis results, trade-off notes — as regular message text **before** invoking `ask_user`.
+After a correction or a bounced question, restate the whole decision context, not the delta; the operator reads the latest message on its own.
 The `question` parameter should be a concise prompt, almost never more than one sentence.
 Options should be short and outcome-oriented.
 When options differ in what they produce, include the rendered before/after — not just measurements of it — in that preceding message.
@@ -483,7 +489,7 @@ Use `tool-use` by default when debugging real CLI flows so logs stay quiet until
 1. Test files are named `*.test.ts` and are collocated under `test/` (not next to source).
 2. Tests use `node:assert/strict` for assertions and `vitest`'s `test` (and `onTestFinished` for per-test cleanup) for the runner. Existing files are the reference style — keep new tests consistent.
 3. Keep tests focused on compatibility helpers rather than broad end-to-end behavior. Mock `globalThis.fetch` for OAuth flows; build payload fixtures inline rather than depending on Pi internals.
-   Three suites are sanctioned exceptions, because depending on the internal *is* what they verify: `test/upstream-prompt-drift.test.ts` imports Pi's own `buildSystemPrompt` (Issue #52), `test/claude-code-version-drift.test.ts` drives Pi's own Anthropic transport to read its `claude-cli` user-agent (Issue #74), and `test/managed-effort-drift.test.ts` drives the same transport to read the effort messages it sends (PR #79).
+   Four suites are sanctioned exceptions, because depending on the internal *is* what they verify: `test/upstream-prompt-drift.test.ts` imports Pi's own `buildSystemPrompt` (Issue #52), `test/claude-code-version-drift.test.ts` drives Pi's own Anthropic transport to read its `claude-cli` user-agent (Issue #74), `test/managed-effort-drift.test.ts` drives the same transport to read the effort messages it sends (PR #79), and `test/message-thread-drift.test.ts` drives it through two thread turns (Issue #89).
    Do not treat any of them as precedent for other suites.
 4. When asserting on shaped system prompts, prefer regex matches that pin specific markers (`/^You are an expert coding assistant\./`, `/<project_context>/`) over deep-equal on full prompt strings, so tests survive harmless reformatting upstream.
    Pin markers Pi actually emits: Pi replaced the `# Project Context` heading with `<project_context>` tags in v0.75.0, and an assertion on the old heading can only pass against a fixture that invented it (Issue #47).
@@ -492,21 +498,24 @@ Use `tool-use` by default when debugging real CLI flows so logs stay quiet until
 
 Current suites map roughly to:
 
-1. `test/oauth-transport.test.ts` — `sk-ant-oat` token gating, `onPayload` composition, `fetch` injection and composition, and delegation to the built-in transport.
+1. `test/oauth-transport.test.ts` — `sk-ant-oat` token gating, `onPayload` composition, `fetch` injection and composition, the OAuth-only message-thread opt-out (Issue #86), and delegation to the built-in transport.
 2. `test/request-shaping.test.ts` — billing header injection, system block layering, beta-header merging, the structural messages-payload guard, and mid-conversation system messages, including the content-less effort messages that survive shaping (PR #79).
 3. `test/claude-code-version.test.ts` — `claude-cli` user-agent parsing and numeric `X.Y.Z` comparison, including the unparseable-candidate fallbacks, and the learned floor.
 4. `test/billing-version-sync.test.ts` — the wire-level `cc_version` upgrade: pass-through when Pi is absent, lower, or equal; rewrite when Pi is higher; the env override's absolute precedence; and that nothing outside the billing block changes.
-   Also the rejection recovery: one retry at the named floor, the floor shared with later requests, success and unrelated 400 responses left unread, and each hint on an unrecovered rejection (Issue #75).
+   Also the rejection recovery: one retry at the named floor, the floor shared with later requests, success and unrelated 400 responses left unread, and each hint on an unrecovered rejection (Issue #75), including a request that carried no billing header (Issue #86).
 5. `test/version-rejection.test.ts` — parsing Anthropic's captured `claude_code_version_too_old` body, preserving its fields when a hint is appended, and each hint's wording.
 6. `test/claude-code-version-drift.test.ts` — the offline drift alarm against the installed pi-ai: `options.fetch` is forwarded, the `claude-cli` user-agent parses, and our pin is not below Pi's (Issue #74).
-7. `test/system-prompt-shaping.test.ts` — section-level removal and replacement, tag balance, tool-snippet and guideline preservation, appended-content preservation, extension-registered sections, and the degraded passthrough path.
+7. `test/system-prompt-shaping.test.ts` — section-level removal and replacement, tag balance, tool-snippet and guideline preservation, appended-content preservation, extension-registered sections, the degraded passthrough path, each Pi prompt wording the peer range spans, and the one-time warning for an unrecognized preamble.
 8. `test/system-prompt-sections.test.ts` — chunk parsing and the byte-exact round-trip, including attribute-bearing tags, nested same-name tags, and unmatched open tags.
 9. `test/pi-anthropic-ordering-experiment.test.ts` — pinned experiments documenting Pi's tool-use and interleaved-thinking serialization behavior, and our passthrough of both (Issue #66).
-10. `test/upstream-prompt-drift.test.ts` — the prompt prefix, section names, and anchors in `src/constants.ts` checked against the installed Pi's own `buildSystemPrompt` output, plus pins that the parser round-trips that prompt and that shaping takes the section path rather than the degraded passthrough.
+10. `test/upstream-prompt-drift.test.ts` — the prompt prefix, section names, and anchor lists in `src/constants.ts` checked against the installed Pi's own `buildSystemPrompt` output, plus pins that the parser round-trips that prompt and that shaping through `shapeSystemBlocks` takes the section path with no warning.
+    Each run verifies only the installed wording: the pins in `check`, the peer floor in `floor`, and each new release in `pi-ceiling`; the entries between them are guarded by the hand-built fixtures in `test/system-prompt-shaping.test.ts`.
 11. `test/extension-config.test.ts` — config paths, the parsing rules (`anthropic` and duplicates dropped, malformed files and entries warned), and a missing file staying silent.
 12. `test/extra-provider-shaping.test.ts` — one `{ api, streamSimple }` registration per named provider, no unregister, first layer wins, and per-layer warning replacement.
 13. `test/managed-effort-drift.test.ts` — the offline drift alarm for per-message effort: Pi's catalog still flags a managed-effort model, and for every model it flags, Pi still carries historical and active effort in content-less system messages, and OAuth shaping keeps every one of them (PR #79).
 14. `test/account-profile.test.ts` — the profile lookup: no request without an OAuth token, the request's headers, tolerant field parsing, and each `unavailable` reason (Issue #80).
+15. `test/message-thread-drift.test.ts` — the offline drift alarm for message threads: Pi still continues an OAuth session's second turn without `system` (the control), the OAuth wrapper still sends it in full with the billing header, and API-key sessions keep Pi's threads (Issue #86, Issue #89).
+    It skips on pi-ai below 1.5.0, which has no threads, as the `floor` job installs (Issue #56).
 
 Priority areas for new tests:
 
@@ -559,10 +568,11 @@ Anthropic rejects OAuth requests for a newly released model when the reported Cl
 Claude Fable 5.1 (`claude-fable-5-1`) requires >= 2.1.251; the 2.1.206 pin blocked it entirely (Issue #60).
 Claude Opus 5.5 (`claude-opus-5-5`, added to pi-ai's catalog in 0.87.1) requires >= 2.1.280; the 2.1.260 pin blocked it entirely (Issue #74).
 Claude Sonnet 5.5 (`claude-sonnet-5-5`, added in pi-ai 0.99.0) accepts 2.1.280 with no rejection and no recovery retry (measured live on pi 0.99.1); that bounds its floor, if any, at or below 2.1.280 without naming one.
+Claude Haiku 5.5 (`claude-haiku-5-5`, added in pi-ai 1.1.0) likewise accepts 2.1.280 with no rejection and no recovery retry (measured live on pi 1.3.0).
 
 Two different version signals reach Anthropic:
 
-1. `user-agent: claude-cli/<version>`, hardcoded as the module-private `claudeCodeVersion` in pi-ai's `anthropic-messages.ts` (2.1.75 through pi 0.84.4; 2.1.251 in 0.86.0 and 0.87.0; 2.1.280 in 0.87.1, which tracks Claude Code releases closely)
+1. `user-agent: claude-cli/<version>`, hardcoded as the module-private `claudeCodeVersion` in pi-ai's `anthropic-messages.ts` (2.1.75 through pi 0.84.4; 2.1.251 in 0.86.0 and 0.87.0; 2.1.280 in 0.87.1; 2.1.322 in 1.5.2, which tracks Claude Code releases closely)
 2. `cc_version=<version>` in the billing header this extension injects, from `CLAUDE_CODE_VERSION` in `src/claude-code-version.ts`
 
 Anthropic gates on the billing header when it is present.
@@ -577,7 +587,8 @@ Since Issue #75 the same `fetch` wrapper also recovers when Anthropic raises a f
 It reads only a 400, through `response.clone()`, and when the body is a `claude_code_version_too_old` rejection naming a higher floor, it rebuilds the billing header at that floor and retries once.
 The floor is remembered for the wrapper's lifetime (one floor for every model), so only the first request after a floor rise pays the rejected round trip.
 Measured live on 2026-09-23: every rejection (n=4, `claude-opus-5-5` and `claude-fable-5-1`) named its floor as `version X.Y.Z or newer is required`, the floor is inclusive, a rejection costs under 0.63 s of whole-process wall time, and six older models accept any version down to 1.0.0.
-When recovery cannot run (an env override is set, the floor is not named, the body cannot be rebuilt) or the retry is rejected too, the 400 reaches the user with a `[pi-anthropic-auth]` hint appended to `error.message`, which says whether to raise the override, set one, or upgrade pi.
+When recovery cannot run (the request carried no billing header, an env override is set, the floor is not named, the body cannot be rebuilt) or the retry is rejected too, the 400 reaches the user with a `[pi-anthropic-auth]` hint appended to `error.message`, which says whether to raise the override, set one, or upgrade pi.
+A header-less request was gated on pi's own `claude-cli` user-agent, so its hint says to upgrade pi and its floor is not learned (Issue #86).
 So a surfaced `claude_code_version_too_old` now always carries that hint, and the hint names the cause.
 
 Do not source the value from a local `claude --version`.
@@ -598,7 +609,7 @@ Pi's built-in Anthropic provider is already much closer to the desired Claude Co
 ### Registering `streamSimple`
 
 The extension registers a `streamSimple` wrapper, because hooks proved insufficient: `before_provider_request` does not fire for compaction or background-agent calls (Issue #18).
-The wrapper stays thin — it delegates to Pi's own built-in Anthropic `streamSimple` transport (resolved at runtime via `src/host-transport.ts`) and only injects an `onPayload` shaping step gated on the OAuth token.
+The wrapper stays thin — it delegates to Pi's own built-in Anthropic `streamSimple` transport (resolved at runtime via `src/host-transport.ts`) and only injects an `onPayload` shaping step, an `options.fetch` wrapper, and a message-thread opt-out, all gated on the OAuth token.
 The delegate is resolved at runtime rather than read out of the api registry: `anthropicMessagesApi()` is the non-deprecated handle pi's own example uses, and reading from a registry this extension does not participate in would bind the delegate to whatever another extension registered there last (on pi <=0.80.7 it would also have recursed, since the bridge put our wrapper in that slot).
 The resolver imports the `@earendil-works/pi-ai/compat` subpath — the path pi's own `custom-provider-gitlab-duo` example delegates through — which Pi's loader maps (through its `alias` or `virtualModules` table) to its own bundled pi-ai compat entrypoint (`dist/compat.js` on pi >=0.80.x).
 It reads the non-deprecated `anthropicMessagesApi().streamSimple` factory and throws if that handle is absent.
@@ -659,6 +670,7 @@ The repo-level fix is `minimumReleaseAge` in `pnpm-workspace.yaml`, currently 60
 
 A local `--frozen-lockfile` run does not reproduce CI's check: pnpm caches a per-lockfile verdict in `~/.cache/pnpm/lockfile-verified.jsonl`, keyed by hash/path/mtime/inode, which survives deleting `node_modules` and moving the store aside.
 Delete that file first, then look for `Verifying lockfile against supply-chain policies` in the output — without that line, the check did not run.
+When the file is absent (pnpm 11 on macOS kept it nowhere under `~`), a frozen install over an up-to-date `node_modules` still exits early without verifying; delete `node_modules` to force the check.
 
 That full re-resolution also pulls every other devDep forward within its caret range — run `pnpm run lint` before assuming the bump is clean (biome 2.4→2.5 forced a config migration in v2.0.2; 2.5.7→2.5.14 forced a schema migration in #67, and vite 8.2→8.3 made `esbuild` a real dependency needing `allowBuilds`).
 
