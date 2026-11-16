@@ -1,6 +1,10 @@
 import type { FetchFunction } from "@earendil-works/pi-ai";
 import type { MessageParam } from "./anthropic-message";
-import { buildBillingHeaderValue, getFirstUserText } from "./billing-header";
+import {
+  BILLING_HEADER_MARKER,
+  buildBillingHeaderValue,
+  getFirstUserText,
+} from "./billing-header";
 import {
   hasClaudeCodeVersionOverride,
   higherVersion,
@@ -9,6 +13,7 @@ import {
   resolveClaudeCodeVersion,
 } from "./claude-code-version";
 import { debugLog } from "./debug";
+import { withBillingBlockOnContinuation } from "./thread-continuation";
 import {
   type ClaudeCodeVersionRejection,
   describeRecoveryHint,
@@ -36,6 +41,15 @@ import {
  * and teaches it to the shared {@link LearnedClaudeCodeFloor} so later
  * requests go out at it directly.  Only a 400 is ever read, and only through
  * a clone, so the streaming success path is untouched.
+ *
+ * pi-ai >=1.5.0 sends later turns of a session as message-thread
+ * continuations without `system`.  The sync splices the billing block back
+ * into each one, the shape Claude Code sends, so a continuation is raised and
+ * recovered like any other request (Issue #90).
+ *
+ * A rejected request that carried no billing header is neither retried nor
+ * learned from: Anthropic gated Pi's own user-agent, so the hint says to
+ * upgrade Pi (Issue #86).
  */
 export interface BillingVersionSync {
   /**
@@ -101,18 +115,26 @@ export function createBillingVersionSync(
 
   const syncFetch = (async (input, init) => {
     const dispatch = baseFetch ?? globalThis.fetch;
-    const pinned = resolveClaudeCodeVersion();
-    const target = targetVersion(readUserAgent(input, init));
-    const upgraded =
-      target === pinned ? undefined : rebuildBody(init?.body, pinned, target);
-    const sentInit =
-      upgraded === undefined ? init : { ...init, body: upgraded };
-    // When the upgrade could not be verified, the body still carries the pin.
-    const sentVersion = upgraded === undefined ? pinned : target;
+    const userAgent = readUserAgent(input, init);
+    const { init: sentInit, version: sentVersion } = prepareOutgoing(
+      init,
+      userAgent,
+    );
 
     const response = await dispatch(input, sentInit);
     const rejection = await readVersionRejection(response);
     if (!rejection) return response;
+
+    // Checked before `planRecovery`, which would learn the floor and blame
+    // the override: without our header, Anthropic gated Pi's user-agent, so
+    // neither the floor nor the override bears on it.  A retry body always
+    // carries the header, so only this first rejection can be header-less.
+    if (lacksBillingHeader(sentInit?.body)) {
+      return hintedResponse(response, rejection, {
+        kind: "no-billing-header",
+        userAgentVersion: readClaudeCliVersion(userAgent),
+      });
+    }
 
     const recovery = planRecovery(rejection, sentInit?.body, sentVersion);
     if (recovery.kind === "hint") {
@@ -142,6 +164,50 @@ export function createBillingVersionSync(
         : { kind: "set-override", requiredVersion: second.requiredVersion },
     );
   }) as FetchFunction;
+
+  /**
+   * The request as it goes out, and the version its billing header carries.
+   *
+   * A message-thread continuation first gets the billing block at the pin,
+   * so it then takes the same path as every other request: the header is
+   * raised from the pin to {@link targetVersion} when that can be verified,
+   * and otherwise goes out at the pin.
+   */
+  function prepareOutgoing(
+    init: RequestInit | undefined,
+    userAgent: string | undefined,
+  ): { init: RequestInit | undefined; version: string } {
+    const pinned = resolveClaudeCodeVersion();
+    const attached = attachToContinuation(init?.body, pinned);
+    const body = attached ?? init?.body;
+    const target = targetVersion(userAgent);
+    const upgraded =
+      target === pinned ? undefined : rebuildBody(body, pinned, target);
+    const sentBody = upgraded ?? attached;
+    const sentInit =
+      sentBody === undefined ? init : { ...init, body: sentBody };
+    // When the upgrade could not be verified, the body still carries the pin.
+    return {
+      init: sentInit,
+      version: upgraded === undefined ? pinned : target,
+    };
+  }
+
+  /**
+   * Returns `body` with the billing block at `version` spliced in, when it is
+   * a message-thread continuation without `system` and a header can be built
+   * for the recorded conversation; otherwise `undefined`.
+   */
+  function attachToContinuation(
+    body: BodyInit | null | undefined,
+    version: string,
+  ): string | undefined {
+    if (typeof body !== "string") return undefined;
+    const header = buildBillingHeaderValue(firstUserText, version);
+    return header === undefined
+      ? undefined
+      : withBillingBlockOnContinuation(body, header);
+  }
 
   /**
    * Decides whether a rejected request can be retried at the floor Anthropic
@@ -187,6 +253,18 @@ export function createBillingVersionSync(
     },
     fetch: syncFetch,
   };
+}
+
+/**
+ * True when a request body provably carries no billing header.
+ *
+ * No header can be built when the conversation's first user message has no
+ * text: shaping adds none, and a message-thread continuation gets none
+ * attached.  A body that is not a string cannot be inspected, so it is not
+ * reported as header-less.
+ */
+function lacksBillingHeader(body: BodyInit | null | undefined): boolean {
+  return typeof body === "string" && !body.includes(BILLING_HEADER_MARKER);
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {

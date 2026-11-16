@@ -268,4 +268,60 @@ describe("createAnthropicOAuthStreamSimple", () => {
     assert.match(sentBodies[1] ?? "", /cc_version=2\.9\.0\./);
     assert.match(sentBodies[2] ?? "", /cc_version=2\.9\.0\./);
   });
+
+  // OAuth requests use pi-ai >=1.5.0's message threads: the fetch wrapper
+  // puts the billing block back on each continuation, so the wrapper leaves
+  // `disableContinuation` to the caller (pi's cache warmer sets it).
+  describe("message-thread continuations", () => {
+    function delegatedOptions(): SimpleStreamOptions {
+      const options = calls[0]?.options;
+      assert.ok(options);
+      return options;
+    }
+
+    test("leaves OAuth requests on pi's continuations", () => {
+      wrapped(MODEL, CONTEXT, { apiKey: OAUTH_TOKEN });
+
+      assert.equal("disableContinuation" in delegatedOptions(), false);
+    });
+
+    test("keeps an OAuth caller's own opt-out", () => {
+      const callerOptions: SimpleStreamOptions = {
+        apiKey: OAUTH_TOKEN,
+        disableContinuation: true,
+      };
+
+      wrapped(MODEL, CONTEXT, callerOptions);
+
+      assert.equal(delegatedOptions().disableContinuation, true);
+    });
+
+    test("keeps an OAuth caller that allowed continuations", () => {
+      const callerOptions: SimpleStreamOptions = {
+        apiKey: OAUTH_TOKEN,
+        disableContinuation: false,
+      };
+
+      wrapped(MODEL, CONTEXT, callerOptions);
+
+      assert.equal(delegatedOptions().disableContinuation, false);
+    });
+
+    test("adds no opt-out to API-key requests", () => {
+      wrapped(MODEL, CONTEXT, { apiKey: API_KEY });
+
+      assert.equal("disableContinuation" in delegatedOptions(), false);
+    });
+
+    test("keeps an API-key caller's own opt-out", () => {
+      const callerOptions: SimpleStreamOptions = {
+        apiKey: API_KEY,
+        disableContinuation: true,
+      };
+
+      wrapped(MODEL, CONTEXT, callerOptions);
+
+      assert.equal(delegatedOptions().disableContinuation, true);
+    });
+  });
 });

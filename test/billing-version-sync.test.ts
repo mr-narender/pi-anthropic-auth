@@ -63,6 +63,26 @@ function shapedPayload(version: string = CLAUDE_CODE_VERSION) {
   };
 }
 
+/**
+ * A shaped payload whose first user message holds no text, so shaping builds
+ * no billing header for it and none can be built for its requests.
+ */
+function textlessPayload() {
+  return {
+    model: "claude-haiku-4-5",
+    stream: true,
+    system: [{ type: "text", text: "You are an expert coding assistant." }],
+    messages: [
+      {
+        role: "user",
+        content: [
+          { type: "tool_result", tool_use_id: "toolu_01", content: "hi" },
+        ],
+      },
+    ],
+  };
+}
+
 function requestInit(
   userAgent: string | undefined,
   body: BodyInit | undefined = JSON.stringify(shapedPayload()),
@@ -608,4 +628,186 @@ describe("hints on unrecovered claude_code_version_too_old rejections", () => {
       sentVersion: REQUIRED,
     });
   });
+
+  // A request without our billing header is gated on Pi's own `claude-cli`
+  // user-agent, which neither the pin nor the override can change.
+  describe("when the rejected request carried no billing header", () => {
+    test("blames Pi's own claude-cli version", async () => {
+      const base = createCapturingFetch([
+        claudeCodeVersionTooOldResponse(REQUIRED),
+        okResponse(),
+      ]);
+      const sync = createBillingVersionSync(
+        createLearnedClaudeCodeFloor(),
+        base.fetch,
+      );
+      sync.recordRequest(textlessPayload());
+
+      const response = await sync.fetch(
+        MESSAGES_URL,
+        requestInit("claude-cli/2.1.280", continuationBody()),
+      );
+
+      await assertHinted(response, {
+        kind: "no-billing-header",
+        userAgentVersion: "2.1.280",
+      });
+      assert.equal(base.calls.length, 1);
+    });
+
+    test("blames Pi rather than an override that was never sent", async () => {
+      withVersionOverride("2.1.260");
+      const base = createCapturingFetch([
+        claudeCodeVersionTooOldResponse(REQUIRED),
+      ]);
+      const sync = createBillingVersionSync(
+        createLearnedClaudeCodeFloor(),
+        base.fetch,
+      );
+      sync.recordRequest(textlessPayload());
+
+      const response = await sync.fetch(
+        MESSAGES_URL,
+        requestInit("claude-cli/2.1.280", continuationBody()),
+      );
+
+      await assertHinted(response, {
+        kind: "no-billing-header",
+        userAgentVersion: "2.1.280",
+      });
+    });
+
+    test("omits Pi's version when the request had no user-agent", async () => {
+      const base = createCapturingFetch([
+        claudeCodeVersionTooOldResponse(REQUIRED),
+      ]);
+      const sync = createBillingVersionSync(
+        createLearnedClaudeCodeFloor(),
+        base.fetch,
+      );
+      sync.recordRequest(textlessPayload());
+
+      const response = await sync.fetch(
+        MESSAGES_URL,
+        requestInit(undefined, continuationBody()),
+      );
+
+      await assertHinted(response, {
+        kind: "no-billing-header",
+        userAgentVersion: undefined,
+      });
+    });
+
+    // The named floor rejected Pi's user-agent, not our header, so later
+    // requests must not have their headers raised on its account.
+    test("does not learn the floor it names", async () => {
+      const floor = createLearnedClaudeCodeFloor();
+      const base = createCapturingFetch([
+        claudeCodeVersionTooOldResponse(REQUIRED),
+      ]);
+      const sync = createBillingVersionSync(floor, base.fetch);
+      sync.recordRequest(textlessPayload());
+
+      await sync.fetch(
+        MESSAGES_URL,
+        requestInit("claude-cli/2.1.280", continuationBody()),
+      );
+
+      assert.equal(floor.applyTo("1.0.0"), "1.0.0");
+    });
+  });
 });
+
+// pi-ai >=1.5.0 builds a continuation after `onPayload` and leaves out
+// `system`; the sync puts the billing block back, as Claude Code sends it.
+describe("message-thread continuations", () => {
+  test("attaches the billing block at the pin when Pi reports no higher version", async () => {
+    const body = await dispatch(
+      requestInit(`claude-cli/${PI_BEHIND}`, continuationBody()),
+    );
+
+    assert.equal(body, continuationWithBlock(CLAUDE_CODE_VERSION));
+  });
+
+  test("raises the attached block to Pi's claude-cli version", async () => {
+    const body = await dispatch(
+      requestInit(`claude-cli/${PI_AHEAD}`, continuationBody()),
+    );
+
+    assert.equal(body, continuationWithBlock(PI_AHEAD));
+  });
+
+  test("sends a continuation at a learned floor without a rejection", async () => {
+    const floor = createLearnedClaudeCodeFloor();
+    floor.learn(REQUIRED);
+    const base = createCapturingFetch([okResponse()]);
+    const sync = createBillingVersionSync(floor, base.fetch);
+    sync.recordRequest(shapedPayload());
+
+    await sync.fetch(MESSAGES_URL, requestInit(undefined, continuationBody()));
+
+    assert.equal(sentBody(base), continuationWithBlock(REQUIRED));
+  });
+
+  test("retries a rejected continuation once at the named floor", async () => {
+    const recovered = okResponse();
+    const base = createCapturingFetch([
+      claudeCodeVersionTooOldResponse(REQUIRED),
+      recovered,
+    ]);
+    const sync = createBillingVersionSync(
+      createLearnedClaudeCodeFloor(),
+      base.fetch,
+    );
+    sync.recordRequest(shapedPayload());
+
+    const response = await sync.fetch(
+      MESSAGES_URL,
+      requestInit(undefined, continuationBody()),
+    );
+
+    assert.equal(base.calls.length, 2);
+    assert.equal(bodyOfCall(base, 1), continuationWithBlock(REQUIRED));
+    assert.equal(response, recovered);
+  });
+
+  test("leaves a continuation untouched when no request was recorded", async () => {
+    const body = await dispatch(requestInit(undefined, continuationBody()), {
+      record: false,
+    });
+
+    assert.equal(body, continuationBody());
+  });
+});
+
+/**
+ * What pi-ai >=1.5.0 sends on a message-thread continuation: only the new
+ * messages, and no `system`.
+ */
+function continuationBody(): string {
+  return JSON.stringify({
+    model: "claude-haiku-4-5",
+    stream: true,
+    messages: [
+      {
+        role: "user",
+        content: [
+          { type: "tool_result", tool_use_id: "toolu_01", content: "hi" },
+        ],
+      },
+    ],
+    thread: { type: "continue", previous_message_id: "msg_01" },
+  });
+}
+
+/**
+ * {@link continuationBody} as it should go out: the billing block for
+ * `USER_TEXT` at `version` spliced in ahead of every byte pi built.
+ */
+function continuationWithBlock(version: string): string {
+  const block = JSON.stringify({
+    type: "text",
+    text: buildExpectedBillingHeader(USER_TEXT, version),
+  });
+  return `{"system":[${block}],${continuationBody().slice(1)}`;
+}

@@ -1,9 +1,9 @@
 import {
   MINIMAL_ANTHROPIC_OAUTH_PROMPT,
-  PI_DEFAULT_PROMPT_PREFIX,
-  PI_DOCS_SECTION_ANCHOR,
+  PI_DEFAULT_PROMPT_PREFIXES,
+  PI_DOCS_SECTION_ANCHORS,
   PI_OWNED_SECTIONS,
-  PI_TOOLS_FILLER_ANCHOR,
+  PI_TOOLS_FILLER_ANCHORS,
   TEXT_REPLACEMENTS,
 } from "./constants";
 import { debugLog, isToolUseOnlyDebugEnabled } from "./debug";
@@ -15,12 +15,14 @@ import {
 } from "./system-prompt-sections";
 
 let warnedPromptUnstructured = false;
+let warnedPreambleUnrecognized = false;
 
 /**
- * Reset the one-time degraded-path warning latch. Exposed for tests.
+ * Reset the one-time shaping warning latches. Exposed for tests.
  */
 export function _resetShapingWarnings(): void {
   warnedPromptUnstructured = false;
+  warnedPreambleUnrecognized = false;
 }
 
 /**
@@ -146,14 +148,20 @@ function decideSection(
 
   const text = applyTextReplacements(body, report);
 
-  if (name === PREAMBLE_SECTION && text.startsWith(PI_DEFAULT_PROMPT_PREFIX)) {
+  if (
+    name === PREAMBLE_SECTION &&
+    PI_DEFAULT_PROMPT_PREFIXES.some((prefix) => text.startsWith(prefix))
+  ) {
     return { kind: "replace", body: MINIMAL_ANTHROPIC_OAUTH_PROMPT };
   }
-  if (name === DOCS_SECTION && text.includes(PI_DOCS_SECTION_ANCHOR)) {
+  if (
+    name === DOCS_SECTION &&
+    PI_DOCS_SECTION_ANCHORS.some((anchor) => text.includes(anchor))
+  ) {
     return { kind: "drop" };
   }
   if (name === "tools") {
-    const stripped = removeParagraphContaining(text, PI_TOOLS_FILLER_ANCHOR);
+    const stripped = removeParagraphContaining(text, PI_TOOLS_FILLER_ANCHORS);
     if (stripped !== text) {
       return { kind: "replace", body: stripped };
     }
@@ -173,9 +181,14 @@ function withBody(chunk: PromptChunk, body: string): PromptChunk {
     : namedSection(chunk.name, body);
 }
 
-function removeParagraphContaining(text: string, anchor: string): string {
+function removeParagraphContaining(
+  text: string,
+  anchors: readonly string[],
+): string {
   const paragraphs = text.split(/\n\n+/);
-  const kept = paragraphs.filter((paragraph) => !paragraph.includes(anchor));
+  const kept = paragraphs.filter(
+    (paragraph) => !anchors.some((anchor) => paragraph.includes(anchor)),
+  );
   return kept.length === paragraphs.length ? text : kept.join("\n\n").trim();
 }
 
@@ -317,19 +330,56 @@ type TextBlock = {
 /**
  * Apply system prompt shaping to an array of Anthropic system text blocks.
  *
- * Finds the first block containing Pi's default prompt preamble and replaces
- * its text in-place (returning a new array).  Blocks without the preamble are
- * passed through unchanged.
+ * Shapes each block containing Pi's default prompt preamble, in any known
+ * wording, and returns a new array.  Blocks without the preamble are passed
+ * through unchanged.
+ *
+ * A block that carries every one of Pi's own sections but no known preamble
+ * is passed through too, with a one-time warning: Pi emits those sections only
+ * alongside its default preamble, so the preamble has most likely been
+ * reworded upstream, and the whole prompt is reaching Anthropic unshaped.
  */
 export function shapeSystemBlocks(blocks: TextBlock[]): TextBlock[] {
   return blocks.map((block) => {
-    if (
-      // eslint-disable-next-line @typescript-eslint/no-unnecessary-condition -- defensive runtime guard
-      block.type !== "text" ||
-      !block.text.includes(PI_DEFAULT_PROMPT_PREFIX)
-    ) {
+    // eslint-disable-next-line @typescript-eslint/no-unnecessary-condition -- defensive runtime guard
+    if (block.type !== "text") {
+      return block;
+    }
+    if (!containsPiPreamble(block.text)) {
+      warnIfPiPromptUnrecognized(block.text);
       return block;
     }
     return { ...block, text: shapeAnthropicOAuthSystemPrompt(block.text) };
   });
+}
+
+/** Whether a system block carries Pi's default preamble, in any known wording. */
+function containsPiPreamble(text: string): boolean {
+  return PI_DEFAULT_PROMPT_PREFIXES.some((prefix) => text.includes(prefix));
+}
+
+/**
+ * Warn once when a block that failed the preamble gate is nonetheless Pi's own
+ * default prompt.
+ *
+ * Every one of {@link PI_OWNED_SECTIONS} is required, not just one: an
+ * extension may write some of those names under a custom prompt
+ * (pi-permission-system writes `tools` and `rules` for subagents), which is
+ * not drift and must not warn.
+ */
+function warnIfPiPromptUnrecognized(text: string): void {
+  if (warnedPreambleUnrecognized) {
+    return;
+  }
+  const names = new Set(
+    parseSystemPromptChunks(text).map((chunk) => chunk.name),
+  );
+  if (!PI_OWNED_SECTIONS.every((section) => names.has(section))) {
+    return;
+  }
+  warnedPreambleUnrecognized = true;
+  console.warn(
+    "[pi-anthropic-auth] Pi's system prompt carries its own sections but opens with a preamble this extension does not recognize; passing it through unshaped. " +
+      "Upstream Pi may have reworded its prompt — re-verify PI_DEFAULT_PROMPT_PREFIXES.",
+  );
 }
